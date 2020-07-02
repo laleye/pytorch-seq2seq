@@ -25,6 +25,11 @@ def train_opts(parser):
         help='teaching force ratio')
     group.add_argument('--gpu', action='store_true',
         help='whether gpu is used')
+    
+    group.add_argument('--gpu-id', type=int, default=0,
+        help='gpu id')
+    
+    
     return group
 
 
@@ -45,7 +50,7 @@ def translate_opts(parser):
 
 def model_opts(parser):
     group = parser.add_argument_group('Model\'s hyper-parameters')
-    group.add_argument('--embed-dim', type=int, default=200,
+    group.add_argument('--embed-dim', type=int, default=100,
         help='dimension of word embeddings')
     group.add_argument('--src_min-freq', type=int, default=0,
         help='''map words of source side appearing less than 
@@ -67,5 +72,8 @@ def model_opts(parser):
         help='dropout applied to layers (0 means no dropout)')
     group.add_argument('--tied', action='store_true',
         help='tie the word embedding and softmax weight')
+    
+    group.add_argument('--pretrained-embedding', type=str, default=None,
+        help='pretrained embeddings')
     return group
 

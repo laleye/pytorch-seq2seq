@@ -20,6 +20,9 @@ import torch.optim as optim
 from options import train_opts
 from options import model_opts
 from model import Seq2seqAttn
+from components import load_pretrained_embedding_from_file
+
+from apex import amp
 
 
 class Trainer(object):
@@ -31,20 +34,29 @@ class Trainer(object):
         self.scheduler = scheduler
         self.clip = clip
         self.n_updates = 0
+        self.accumulation_steps = 50
 
     def get_lr(self):
         return self.optimizer.param_groups[0]['lr']
 
-    def step(self, samples, tf_ratio):
-        self.optimizer.zero_grad()
+    def step(self, samples, tf_ratio, i):
+        #self.model.zero_grad() #gradient accumulation step1
+        #self.optimizer.zero_grad() #gradient accumulation step1
         bsz = samples.src.size(1)
         outs = self.model(samples.src, samples.tgt, tf_ratio)
         loss = self.criterion(outs.view(-1, outs.size(2)), samples.tgt.view(-1))
 
+        
         if self.model.training:
+            loss = loss / self.accumulation_steps #gradient accumulation step2
+            #with amp.scale_loss(loss, self.optimizer) as scale_loss:
+                #scale_loss.backward()
             loss.backward()
-            nn.utils.clip_grad_norm_(self.model.parameters(), self.clip)
-            self.optimizer.step()
+            
+            if (i+1) % self.accumulation_steps == 0: 
+                nn.utils.clip_grad_norm_(self.model.parameters(), self.clip)
+                self.optimizer.step()
+                self.optimizer.zero_grad()
             self.n_updates += 1
         return loss
 
@@ -69,19 +81,29 @@ def save_field(savedir, fields):
         dill.dump(field, fout)
     
 
+def load_fasttext_embeddings(path):
+    embeddings = torch.load(path)
+    return embeddings
+
+
 def main(args):
+    os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu_id)
+    
     device = torch.device('cuda' if args.gpu  else 'cpu')
 
     # load data and construct vocabulary dictionary
     SRC = data.Field(lower=True)
-    TGT = data.Field(lower=True, eos_token='<eos>')
+    TGT = data.Field(lower=True, eos_token='<eos>', fix_length=50)
     fields = [('src', SRC), ('tgt', TGT)]
 
+    print('load train data')
     train_data = data.TabularDataset(
         path=args.train,
         format='tsv',
         fields=fields,
     )
+    
+    print('load valid data')
 
     valid_data = data.TabularDataset(
         path=args.valid,
@@ -89,6 +111,7 @@ def main(args):
         fields=fields,
     )
 
+    print('build vocabularies')
     SRC.build_vocab(train_data, min_freq=args.src_min_freq)
     TGT.build_vocab(train_data, min_freq=args.tgt_min_freq)
 
@@ -100,6 +123,12 @@ def main(args):
         save_field(args.savedir, field)
         save_vocab(args.savedir, field)
 
+    if args.pretrained_embedding is not None:
+        #pretrained = load_pretrained_embedding_from_file(args.pretrained_embedding, fields[0][1], 300)
+        pretrained = load_fasttext_embeddings(args.pretrained_embedding)
+    else:
+        pretrained = None
+        
     # set iterator
     train_iter, valid_iter = data.BucketIterator.splits(
         (train_data, valid_data), 
@@ -110,7 +139,10 @@ def main(args):
         device=device
     )
     
-    model = Seq2seqAttn(args, fields, device).to(device)
+    
+    
+    print('load model')
+    model = Seq2seqAttn(args, pretrained, fields, device).to(device)
     print(model)
     print('')
 
@@ -118,6 +150,13 @@ def main(args):
     optimizer = optim.SGD(model.parameters(), lr=args.lr)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min')
     trainer = Trainer(model, criterion, optimizer, scheduler, args.clip)
+   
+    opt_level = 'O3'
+    #model, optimizer = amp.initialize(model, 
+                                    #optimizer,
+                                    #keep_batchnorm_fp32=False,
+                                    #opt_level=opt_level)
+   
    
     epoch = 1
     max_epoch = args.max_epoch or math.inf
@@ -131,9 +170,12 @@ def main(args):
         with tqdm(train_iter, dynamic_ncols=True) as pbar:
             train_loss = 0.0
             trainer.model.train()
+            #trainer.model.zero_grad() #gradient accumulation step1
+            ibz = 0
             for samples in pbar:
                 bsz = samples.src.size(1)
-                loss = trainer.step(samples, args.tf_ratio)
+                ibz += 1 
+                loss = trainer.step(samples, args.tf_ratio, ibz)
                 train_loss += loss.item()
 
                 # setting of progressbar

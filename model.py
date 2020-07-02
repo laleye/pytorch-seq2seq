@@ -8,9 +8,12 @@ import torch.nn.functional as F
 
 
 class EncRNN(nn.Module):
-    def __init__(self, vsz, embed_dim, hidden_dim, n_layers, use_birnn, dout):
+    def __init__(self, vsz, pretrained, embed_dim, hidden_dim, n_layers, use_birnn, dout):
         super(EncRNN, self).__init__()
-        self.embed = nn.Embedding(vsz, embed_dim)
+        if pretrained is None:
+            self.embed = nn.Embedding(vsz, embed_dim)
+        else:
+            self.embed = pretrained
         self.rnn = nn.LSTM(embed_dim, hidden_dim, n_layers,
                            bidirectional=use_birnn)
         self.dropout = nn.Dropout(dout)
@@ -56,17 +59,26 @@ class Attention(nn.Module):
 
 
 class DecRNN(nn.Module):
-    def __init__(self, vsz, embed_dim, hidden_dim, n_layers, use_birnn, 
+    def __init__(self, vsz, pretrained, embed_dim, hidden_dim, n_layers, use_birnn, 
                  dout, attn, tied):
         super(DecRNN, self).__init__()
         hidden_dim = hidden_dim*2 if use_birnn else hidden_dim
+        
+        pretrained = None
+        
+        if pretrained is None:
+            self.embed = nn.Embedding(vsz, embed_dim)
+        else:
+            self.embed = pretrained
 
-        self.embed = nn.Embedding(vsz, embed_dim)
+        #self.embed = nn.Embedding(vsz, embed_dim)
         self.rnn = nn.LSTM(embed_dim, hidden_dim , n_layers)
 
         self.w = nn.Linear(hidden_dim*2, hidden_dim)
         self.attn = Attention(hidden_dim, attn)
 
+
+        
         self.out_projection = nn.Linear(hidden_dim, vsz)
         if tied: 
             if embed_dim != hidden_dim:
@@ -90,14 +102,14 @@ class DecRNN(nn.Module):
 
 
 class Seq2seqAttn(nn.Module):
-    def __init__(self, args, fields, device):
+    def __init__(self, args, pretrained, fields, device):
         super().__init__()
         self.src_field, self.tgt_field = fields
         self.src_vsz = len(self.src_field[1].vocab.itos)
         self.tgt_vsz = len(self.tgt_field[1].vocab.itos)
-        self.encoder = EncRNN(self.src_vsz, args.embed_dim, args.hidden_dim, 
+        self.encoder = EncRNN(self.src_vsz, pretrained, args.embed_dim, args.hidden_dim, 
                               args.n_layers, args.bidirectional, args.dropout)
-        self.decoder = DecRNN(self.tgt_vsz, args.embed_dim, args.hidden_dim, 
+        self.decoder = DecRNN(self.tgt_vsz, pretrained, args.embed_dim, args.hidden_dim, 
                               args.n_layers, args.bidirectional, args.dropout,
                               args.attn, args.tied)
         self.device = device
@@ -107,9 +119,10 @@ class Seq2seqAttn(nn.Module):
 
     def forward(self, srcs, tgts=None, maxlen=100, tf_ratio=0.0):
         slen, bsz = srcs.size()
+        #print(isinstance(tgts, torch.Tensor))
         tlen = tgts.size(0) if isinstance(tgts, torch.Tensor) else maxlen
         tf_ratio = tf_ratio if isinstance(tgts, torch.Tensor) else 0.0
-       
+        #print(slen, tlen)
         enc_outs, hidden = self.encoder(srcs)
 
         dec_inputs = torch.ones_like(srcs[0]) * 2 # <eos> is mapped to id=2
