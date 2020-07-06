@@ -25,9 +25,13 @@ def train_opts(parser):
         help='teaching force ratio')
     group.add_argument('--gpu', action='store_true',
         help='whether gpu is used')
-    
+    group.add_argument('--max-len', type=int, default=0,
+        help='gpu id')
     group.add_argument('--gpu-id', type=int, default=0,
         help='gpu id')
+    
+    group.add_argument('--amp', action='store_true',
+        help='whether gpu is used')
     
     
     return group
@@ -72,8 +76,11 @@ def model_opts(parser):
         help='dropout applied to layers (0 means no dropout)')
     group.add_argument('--tied', action='store_true',
         help='tie the word embedding and softmax weight')
-    
-    group.add_argument('--pretrained-embedding', type=str, default=None,
+    group.add_argument('--pretrained-embedding-name', type=str, default=None,
         help='pretrained embeddings')
+    group.add_argument('--pretrained-embedding-path', type=str, default=None,
+        help='pretrained embeddings')
+    group.add_argument('--parallel-model', action='store_true',
+        help='whether gpu is used')
     return group
 

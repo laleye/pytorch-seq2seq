@@ -8,12 +8,13 @@ import torch.nn.functional as F
 
 
 class EncRNN(nn.Module):
-    def __init__(self, vsz, pretrained, embed_dim, hidden_dim, n_layers, use_birnn, dout):
+    def __init__(self, vsz, pretrained, TEXT, embed_dim, hidden_dim, n_layers, use_birnn, dout):
         super(EncRNN, self).__init__()
-        if pretrained is None:
+        if not pretrained:
             self.embed = nn.Embedding(vsz, embed_dim)
         else:
-            self.embed = pretrained
+            self.embed = nn.Embedding(vsz, embed_dim).from_pretrained(TEXT.vocab.vectors)
+            
         self.rnn = nn.LSTM(embed_dim, hidden_dim, n_layers,
                            bidirectional=use_birnn)
         self.dropout = nn.Dropout(dout)
@@ -64,9 +65,9 @@ class DecRNN(nn.Module):
         super(DecRNN, self).__init__()
         hidden_dim = hidden_dim*2 if use_birnn else hidden_dim
         
-        pretrained = None
+        pretrained = False
         
-        if pretrained is None:
+        if pretrained is False:
             self.embed = nn.Embedding(vsz, embed_dim)
         else:
             self.embed = pretrained
@@ -107,7 +108,7 @@ class Seq2seqAttn(nn.Module):
         self.src_field, self.tgt_field = fields
         self.src_vsz = len(self.src_field[1].vocab.itos)
         self.tgt_vsz = len(self.tgt_field[1].vocab.itos)
-        self.encoder = EncRNN(self.src_vsz, pretrained, args.embed_dim, args.hidden_dim, 
+        self.encoder = EncRNN(self.src_vsz, pretrained, self.src_field[1], args.embed_dim, args.hidden_dim, 
                               args.n_layers, args.bidirectional, args.dropout)
         self.decoder = DecRNN(self.tgt_vsz, pretrained, args.embed_dim, args.hidden_dim, 
                               args.n_layers, args.bidirectional, args.dropout,

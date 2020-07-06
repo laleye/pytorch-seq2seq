@@ -21,13 +21,15 @@ from options import train_opts
 from options import model_opts
 from model import Seq2seqAttn
 from components import load_pretrained_embedding_from_file
+from torchtext.vocab import Vectors
+
 
 from apex import amp
 
 
 class Trainer(object):
     def __init__(
-        self, model, criterion, optimizer, scheduler, clip):
+        self, model, criterion, optimizer, scheduler, clip, parallel_model=False, amp=False):
         self.model = model
         self.criterion = criterion
         self.optimizer = optimizer
@@ -35,28 +37,35 @@ class Trainer(object):
         self.clip = clip
         self.n_updates = 0
         self.accumulation_steps = 50
+        self.parallel_model = parallel_model
+        self.amp = amp
 
     def get_lr(self):
         return self.optimizer.param_groups[0]['lr']
 
-    def step(self, samples, tf_ratio, i):
+    def step(self, samples, tf_ratio, i=0):
         #self.model.zero_grad() #gradient accumulation step1
-        #self.optimizer.zero_grad() #gradient accumulation step1
+        self.optimizer.zero_grad() #gradient accumulation step1
         bsz = samples.src.size(1)
         outs = self.model(samples.src, samples.tgt, tf_ratio)
         loss = self.criterion(outs.view(-1, outs.size(2)), samples.tgt.view(-1))
 
         
         if self.model.training:
-            loss = loss / self.accumulation_steps #gradient accumulation step2
-            #with amp.scale_loss(loss, self.optimizer) as scale_loss:
-                #scale_loss.backward()
-            loss.backward()
+            #loss = loss / self.accumulation_steps #gradient accumulation step2
             
-            if (i+1) % self.accumulation_steps == 0: 
-                nn.utils.clip_grad_norm_(self.model.parameters(), self.clip)
-                self.optimizer.step()
-                self.optimizer.zero_grad()
+            if self.amp:
+                with amp.scale_loss(loss, self.optimizer) as scale_loss:
+                    scale_loss.backward()
+            
+            if self.parallel_model:
+                loss.mean().backward()
+            elif not self.amp:
+                loss.backward()
+            nn.utils.clip_grad_norm_(self.model.parameters(), self.clip)
+            #if (i+1) % self.accumulation_steps == 0: 
+            self.optimizer.step()
+            #self.optimizer.zero_grad()
             self.n_updates += 1
         return loss
 
@@ -91,9 +100,25 @@ def main(args):
     
     device = torch.device('cuda' if args.gpu  else 'cpu')
 
+    
+        
+    
     # load data and construct vocabulary dictionary
-    SRC = data.Field(lower=True)
-    TGT = data.Field(lower=True, eos_token='<eos>', fix_length=50)
+    SRC = data.Field(lower=True, 
+                     init_token = '<sos>',
+                     eos_token = '<eos>')
+    
+    ast_max_len = int(args.max_len)
+    if  ast_max_len != 0:
+        TGT = data.Field(lower=True,
+                         init_token = '<sos>',
+                         eos_token='<eos>',
+                         fix_length = ast_max_len)
+    else:
+        TGT = data.Field(lower=True,
+                         init_token = '<sos>',
+                         eos_token='<eos>')
+        
     fields = [('src', SRC), ('tgt', TGT)]
 
     print('load train data')
@@ -111,8 +136,20 @@ def main(args):
         fields=fields,
     )
 
+    if args.pretrained_embedding_name is not None and args.pretrained_embedding_path is not None:
+        #pretrained = load_pretrained_embedding_from_file(args.pretrained_embedding, fields[0][1], 300)
+        vectors = Vectors(name=args.pretrained_embedding_name, cache=args.pretrained_embedding_path) # model_name + path = path_to_embeddings_file
+        SRC.build_vocab(train_data, min_freq=args.src_min_freq, vectors=vectors)
+        pretrained = True
+
+        #pretrained = load_fasttext_embeddings(args.pretrained_embedding)
+    else:
+        vectors = None
+        SRC.build_vocab(train_data, min_freq=args.src_min_freq)
+        pretrained = False
+        
     print('build vocabularies')
-    SRC.build_vocab(train_data, min_freq=args.src_min_freq)
+    
     TGT.build_vocab(train_data, min_freq=args.tgt_min_freq)
 
     if not os.path.exists(args.savedir):
@@ -123,11 +160,7 @@ def main(args):
         save_field(args.savedir, field)
         save_vocab(args.savedir, field)
 
-    if args.pretrained_embedding is not None:
-        #pretrained = load_pretrained_embedding_from_file(args.pretrained_embedding, fields[0][1], 300)
-        pretrained = load_fasttext_embeddings(args.pretrained_embedding)
-    else:
-        pretrained = None
+    
         
     # set iterator
     train_iter, valid_iter = data.BucketIterator.splits(
@@ -145,28 +178,39 @@ def main(args):
     model = Seq2seqAttn(args, pretrained, fields, device).to(device)
     print(model)
     print('')
+    
+    if args.parallel_model:
+        model = nn.DataParallel(model, device_ids=[0, 1, 2])
 
+
+    
+   
     criterion = nn.CrossEntropyLoss(ignore_index=TGT.vocab.stoi['<pad>'])
     optimizer = optim.SGD(model.parameters(), lr=args.lr)
+    
+    if args.amp:
+        opt_level = 'O3'
+        model, optimizer = amp.initialize(model, 
+                                optimizer,
+                                keep_batchnorm_fp32=False,
+                                opt_level=opt_level)
+    
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min')
-    trainer = Trainer(model, criterion, optimizer, scheduler, args.clip)
+    trainer = Trainer(model, criterion, optimizer, scheduler, args.clip, args.parallel_model, args.amp)
    
-    opt_level = 'O3'
-    #model, optimizer = amp.initialize(model, 
-                                    #optimizer,
-                                    #keep_batchnorm_fp32=False,
-                                    #opt_level=opt_level)
-   
+    
    
     epoch = 1
     max_epoch = args.max_epoch or math.inf
     max_update = args.max_update or math.inf
     best_loss = math.inf
 
+    
     while epoch < max_epoch and trainer.n_updates < max_update \
         and args.min_lr < trainer.get_lr():
 
         # training
+        print(torch.cuda.is_available())
         with tqdm(train_iter, dynamic_ncols=True) as pbar:
             train_loss = 0.0
             trainer.model.train()
@@ -176,6 +220,7 @@ def main(args):
                 bsz = samples.src.size(1)
                 ibz += 1 
                 loss = trainer.step(samples, args.tf_ratio, ibz)
+                #print(loss)
                 train_loss += loss.item()
 
                 # setting of progressbar
@@ -188,6 +233,10 @@ def main(args):
                     clip=args.clip, 
                     num_updates=trainer.n_updates)
                 pbar.set_postfix(progress_state)
+                
+            print('current memory allocated: {}'.format(torch.cuda.memory_allocated() / 1024 ** 2))
+            print('max memory allocated: {}'.format(torch.cuda.max_memory_allocated() / 1024 ** 2))
+            print('cached memory: {}'.format(torch.cuda.memory_cached() / 1024 ** 2))
         train_loss /= len(train_iter)
 
         print(f"| epoch {str(epoch).zfill(3)} | train ", end="") 
